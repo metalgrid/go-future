@@ -2,18 +2,98 @@ package future
 
 import (
 	"context"
-	"github.com/metalgrid/go-future/atomic"
-	"github.com/metalgrid/go-future/ch"
+	"errors"
 	"runtime"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/metalgrid/go-future/atomic"
+	"github.com/metalgrid/go-future/ch"
 )
+
+func BenchmarkPooledFutures(b *testing.B) {
+	b.Run("MutexPooled", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			future := NewFromPool[int]()
+			future.Resolve(42)
+			result, _ := future.Wait(context.Background())
+			if result != 42 {
+				b.Errorf("expected 42, got %d", result)
+			}
+			Put(future)
+		}
+	})
+
+	b.Run("ChannelPooled", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			future := ch.NewFromPool[int]()
+			future.Resolve(42)
+			result, _ := future.Wait(context.Background())
+			if result != 42 {
+				b.Errorf("expected 42, got %d", result)
+			}
+			ch.Put(future)
+		}
+	})
+
+	b.Run("AtomicPooled", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			future := atomic.NewFromPool[int]()
+			future.Resolve(42)
+			result, _ := future.Wait(context.Background())
+			if result != 42 {
+				b.Errorf("expected 42, got %d", result)
+			}
+			atomic.Put(future)
+		}
+	})
+}
+
+func BenchmarkRandomRejections(b *testing.B) {
+	b.Run("MutexRandomRejections", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			future := New[int]()
+			if i%2 == 0 {
+				future.Resolve(42)
+			} else {
+				future.Reject(errors.New("error"))
+			}
+			if _, err := future.Wait(context.Background()); err != nil && i%2 == 0 {
+				b.Errorf("expected no error, got %v", err)
+			}
+			Put(future)
+		}
+	})
+
+	// benchmark random rejections
+	b.Run("MutexPooledRandomRejections", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			future := NewFromPool[int]()
+			if i%2 == 0 {
+				future.Resolve(42)
+			} else {
+				future.Reject(errors.New("error"))
+			}
+			if _, err := future.Wait(context.Background()); err != nil && i%2 == 0 {
+				b.Errorf("expected no error, got %v", err)
+			}
+			Put(future)
+		}
+	})
+}
 
 func BenchmarkMillionFutures(b *testing.B) {
 	const numFutures = 1_000_000
 
-	b.Run("CreateAndResolve", func(b *testing.B) {
+	// Mutex-based implementation
+	b.Run("MutexCreateAndResolve", func(b *testing.B) {
+		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			futures := make([]*Future[int], numFutures)
 
@@ -35,7 +115,141 @@ func BenchmarkMillionFutures(b *testing.B) {
 		}
 	})
 
-	b.Run("CreateResolveAndWait", func(b *testing.B) {
+	b.Run("MutexPooledCreateAndResolve", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			futures := make([]*Future[int], numFutures)
+
+			// Create a million futures from pool
+			for j := 0; j < numFutures; j++ {
+				futures[j] = NewFromPool[int]()
+			}
+
+			// Resolve all futures concurrently
+			var wg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					futures[idx].Resolve(idx)
+				}(j)
+			}
+			wg.Wait()
+
+			// Return to pool
+			for j := 0; j < numFutures; j++ {
+				Put(futures[j])
+			}
+		}
+	})
+
+	// Channel-based implementation
+	b.Run("ChannelCreateAndResolve", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			futures := make([]*ch.Future[int], numFutures)
+
+			// Create a million futures
+			for j := 0; j < numFutures; j++ {
+				futures[j] = ch.New[int]()
+			}
+
+			// Resolve all futures concurrently
+			var wg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					futures[idx].Resolve(idx)
+				}(j)
+			}
+			wg.Wait()
+		}
+	})
+
+	b.Run("ChannelPooledCreateAndResolve", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			futures := make([]*ch.Future[int], numFutures)
+
+			// Create a million futures from pool
+			for j := 0; j < numFutures; j++ {
+				futures[j] = ch.NewFromPool[int]()
+			}
+
+			// Resolve all futures concurrently
+			var wg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					futures[idx].Resolve(idx)
+				}(j)
+			}
+			wg.Wait()
+
+			// Return to pool
+			for j := 0; j < numFutures; j++ {
+				ch.Put(futures[j])
+			}
+		}
+	})
+
+	// Atomic hybrid implementation
+	b.Run("AtomicCreateAndResolve", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			futures := make([]*atomic.Future[int], numFutures)
+
+			// Create a million futures
+			for j := 0; j < numFutures; j++ {
+				futures[j] = atomic.New[int]()
+			}
+
+			// Resolve all futures concurrently
+			var wg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					futures[idx].Resolve(idx)
+				}(j)
+			}
+			wg.Wait()
+		}
+	})
+
+	b.Run("AtomicPooledCreateAndResolve", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			futures := make([]*atomic.Future[int], numFutures)
+
+			// Create a million futures from pool
+			for j := 0; j < numFutures; j++ {
+				futures[j] = atomic.NewFromPool[int]()
+			}
+
+			// Resolve all futures concurrently
+			var wg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					futures[idx].Resolve(idx)
+				}(j)
+			}
+			wg.Wait()
+
+			// Return to pool
+			for j := 0; j < numFutures; j++ {
+				atomic.Put(futures[j])
+			}
+		}
+	})
+
+	// Create, Resolve, and Wait benchmarks
+	b.Run("MutexCreateResolveAndWait", func(b *testing.B) {
+		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			futures := make([]*Future[int], numFutures)
 			ctx := context.Background()
@@ -70,7 +284,203 @@ func BenchmarkMillionFutures(b *testing.B) {
 		}
 	})
 
-	b.Run("MemoryUsage", func(b *testing.B) {
+	b.Run("MutexPooledCreateResolveAndWait", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			futures := make([]*Future[int], numFutures)
+			ctx := context.Background()
+
+			// Create a million futures from pool
+			for j := 0; j < numFutures; j++ {
+				futures[j] = NewFromPool[int]()
+			}
+
+			// Resolve all futures concurrently
+			var resolveWg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				resolveWg.Add(1)
+				go func(idx int) {
+					defer resolveWg.Done()
+					futures[idx].Resolve(idx)
+				}(j)
+			}
+
+			// Wait on all futures concurrently
+			var waitWg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				waitWg.Add(1)
+				go func(idx int) {
+					defer waitWg.Done()
+					_, _ = futures[idx].Wait(ctx)
+				}(j)
+			}
+
+			resolveWg.Wait()
+			waitWg.Wait()
+
+			// Return to pool
+			for j := 0; j < numFutures; j++ {
+				Put(futures[j])
+			}
+		}
+	})
+
+	b.Run("ChannelCreateResolveAndWait", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			futures := make([]*ch.Future[int], numFutures)
+			ctx := context.Background()
+
+			// Create a million futures
+			for j := 0; j < numFutures; j++ {
+				futures[j] = ch.New[int]()
+			}
+
+			// Resolve all futures concurrently
+			var resolveWg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				resolveWg.Add(1)
+				go func(idx int) {
+					defer resolveWg.Done()
+					futures[idx].Resolve(idx)
+				}(j)
+			}
+
+			// Wait on all futures concurrently
+			var waitWg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				waitWg.Add(1)
+				go func(idx int) {
+					defer waitWg.Done()
+					_, _ = futures[idx].Wait(ctx)
+				}(j)
+			}
+
+			resolveWg.Wait()
+			waitWg.Wait()
+		}
+	})
+
+	b.Run("ChannelPooledCreateResolveAndWait", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			futures := make([]*ch.Future[int], numFutures)
+			ctx := context.Background()
+
+			// Create a million futures from pool
+			for j := 0; j < numFutures; j++ {
+				futures[j] = ch.NewFromPool[int]()
+			}
+
+			// Resolve all futures concurrently
+			var resolveWg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				resolveWg.Add(1)
+				go func(idx int) {
+					defer resolveWg.Done()
+					futures[idx].Resolve(idx)
+				}(j)
+			}
+
+			// Wait on all futures concurrently
+			var waitWg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				waitWg.Add(1)
+				go func(idx int) {
+					defer waitWg.Done()
+					_, _ = futures[idx].Wait(ctx)
+				}(j)
+			}
+
+			resolveWg.Wait()
+			waitWg.Wait()
+
+			// Return to pool
+			for j := 0; j < numFutures; j++ {
+				ch.Put(futures[j])
+			}
+		}
+	})
+
+	b.Run("AtomicCreateResolveAndWait", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			futures := make([]*atomic.Future[int], numFutures)
+			ctx := context.Background()
+
+			// Create a million futures
+			for j := 0; j < numFutures; j++ {
+				futures[j] = atomic.New[int]()
+			}
+
+			// Resolve all futures concurrently
+			var resolveWg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				resolveWg.Add(1)
+				go func(idx int) {
+					defer resolveWg.Done()
+					futures[idx].Resolve(idx)
+				}(j)
+			}
+
+			// Wait on all futures concurrently
+			var waitWg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				waitWg.Add(1)
+				go func(idx int) {
+					defer waitWg.Done()
+					_, _ = futures[idx].Wait(ctx)
+				}(j)
+			}
+
+			resolveWg.Wait()
+			waitWg.Wait()
+		}
+	})
+
+	b.Run("AtomicPooledCreateResolveAndWait", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			futures := make([]*atomic.Future[int], numFutures)
+			ctx := context.Background()
+
+			// Create a million futures from pool
+			for j := 0; j < numFutures; j++ {
+				futures[j] = atomic.NewFromPool[int]()
+			}
+
+			// Resolve all futures concurrently
+			var resolveWg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				resolveWg.Add(1)
+				go func(idx int) {
+					defer resolveWg.Done()
+					futures[idx].Resolve(idx)
+				}(j)
+			}
+
+			// Wait on all futures concurrently
+			var waitWg sync.WaitGroup
+			for j := 0; j < numFutures; j++ {
+				waitWg.Add(1)
+				go func(idx int) {
+					defer waitWg.Done()
+					_, _ = futures[idx].Wait(ctx)
+				}(j)
+			}
+
+			resolveWg.Wait()
+			waitWg.Wait()
+
+			// Return to pool
+			for j := 0; j < numFutures; j++ {
+				atomic.Put(futures[j])
+			}
+		}
+	})
+
+	// Memory usage benchmarks
+	b.Run("MutexMemoryUsage", func(b *testing.B) {
 		b.ReportAllocs()
 
 		for i := 0; i < b.N; i++ {
@@ -88,6 +498,126 @@ func BenchmarkMillionFutures(b *testing.B) {
 
 			// Force GC to measure actual memory usage
 			runtime.GC()
+		}
+	})
+
+	b.Run("MutexPooledMemoryUsage", func(b *testing.B) {
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			futures := make([]*Future[string], numFutures)
+
+			// Create futures from pool
+			for j := 0; j < numFutures; j++ {
+				futures[j] = NewFromPool[string]()
+			}
+
+			// Resolve a subset to test mixed states
+			for j := 0; j < numFutures/2; j++ {
+				futures[j].Resolve("resolved")
+			}
+
+			// Force GC to measure actual memory usage
+			runtime.GC()
+
+			// Return to pool
+			for j := 0; j < numFutures; j++ {
+				Put(futures[j])
+			}
+		}
+	})
+
+	b.Run("ChannelMemoryUsage", func(b *testing.B) {
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			futures := make([]*ch.Future[string], numFutures)
+
+			// Create futures
+			for j := 0; j < numFutures; j++ {
+				futures[j] = ch.New[string]()
+			}
+
+			// Resolve a subset to test mixed states
+			for j := 0; j < numFutures/2; j++ {
+				futures[j].Resolve("resolved")
+			}
+
+			// Force GC to measure actual memory usage
+			runtime.GC()
+		}
+	})
+
+	b.Run("ChannelPooledMemoryUsage", func(b *testing.B) {
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			futures := make([]*ch.Future[string], numFutures)
+
+			// Create futures from pool
+			for j := 0; j < numFutures; j++ {
+				futures[j] = ch.NewFromPool[string]()
+			}
+
+			// Resolve a subset to test mixed states
+			for j := 0; j < numFutures/2; j++ {
+				futures[j].Resolve("resolved")
+			}
+
+			// Force GC to measure actual memory usage
+			runtime.GC()
+
+			// Return to pool
+			for j := 0; j < numFutures; j++ {
+				ch.Put(futures[j])
+			}
+		}
+	})
+
+	b.Run("AtomicMemoryUsage", func(b *testing.B) {
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			futures := make([]*atomic.Future[string], numFutures)
+
+			// Create futures
+			for j := 0; j < numFutures; j++ {
+				futures[j] = atomic.New[string]()
+			}
+
+			// Resolve a subset to test mixed states
+			for j := 0; j < numFutures/2; j++ {
+				futures[j].Resolve("resolved")
+			}
+
+			// Force GC to measure actual memory usage
+			runtime.GC()
+		}
+	})
+
+	b.Run("AtomicPooledMemoryUsage", func(b *testing.B) {
+		b.ReportAllocs()
+
+		for i := 0; i < b.N; i++ {
+			futures := make([]*atomic.Future[string], numFutures)
+
+			// Create futures from pool
+			for j := 0; j < numFutures; j++ {
+				futures[j] = atomic.NewFromPool[string]()
+			}
+
+			// Resolve a subset to test mixed states
+			for j := 0; j < numFutures/2; j++ {
+				futures[j].Resolve("resolved")
+			}
+
+			// Force GC to measure actual memory usage
+			runtime.GC()
+
+			// Return to pool
+			for j := 0; j < numFutures; j++ {
+				atomic.Put(futures[j])
+			}
 		}
 	})
 }
